@@ -1,0 +1,7 @@
+addkeysection "Demolitionist Radio" "SWWMGZ_RADIO"
+alias nextsong "netevent swwm_mustrack"
+alias songinfo "netevent swwm_musinfo"
+alias nextlist "netevent swwm_muslist"
+addmenukey "Next Track" "nextsong"
+addmenukey "Track Info" "songinfo"
+addmenukey "Next Playlist" "nextlist"

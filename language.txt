@@ -1,0 +1,11 @@
+[default]
+SWWM_RADIOSETUP = "\cvDemolitionist Radio\c- has been installed.";
+SWWM_RADIOPLWARN = "\cgWARNING:\c- No playlists have been loaded with \cvDemolitionist Radio\c-.";
+SWWM_RADIOUNINST = "\cyDemolitionist Radio\c- has been uninstalled.";
+SWWM_NORADIO = "\cdRadio OFF\c-";
+
+[es]
+SWWM_RADIOSETUP = "\cvRadio Demolicionista\c- has sido instalada.";
+SWWM_RADIOPLWARN = "\cgADVERTENCIA:\c- No se han cargado listas de reproducción con \cvRadio Demolicionista\c-.";
+SWWM_RADIOUNINST = "\cyRadio Demolicionista\c- ha sido desinstalada.";
+SWWM_NORADIO = "\cdRadio DESACTIVADA\c-";

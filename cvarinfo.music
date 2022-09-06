@@ -1,0 +1,2 @@
+nosave bool swwmmus_loop = false;	// loops music, otherwise tracks play after one another
+nosave bool swwmmus_shuffle = true;	// playlists are shuffled

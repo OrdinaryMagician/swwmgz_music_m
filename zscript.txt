@@ -1,0 +1,440 @@
+version "4.8"
+
+/*
+   DEMOLITIONIST RADIO (C)2020-2022 Marisa the Magician, UnSX Team.
+   The current code is an unholy mess, but it's definitely usable.
+
+   Things yet to be done:
+    - Make radio ui-scoped so song switching works when menus stop the playsim.
+      (Might be hard considering we depend on a very much play-scoped static
+       thinker for per-session data storage)
+    - Figure a way to stop the radio from glitching on scripted music changes.
+      (A good example of this issue is Valiant's MAP27 and MAP30)
+    - Integration into DEMOLITIONIST through a custom Radio tab.
+      (This one should be done through a separate package, as the radio itself
+       should be entirely standalone)
+*/
+
+// "now playing" message
+Class SWWMSongInfo : HUDMessageBase
+{
+	String txt, txt2;
+	BrokenLines l;
+	double tics, holdtics, fadeintics, fadeouttics;
+	Font mSmallFont;
+
+	SWWMSongInfo Init( SWWMMusicTrack trk, String playlist = "" )
+	{
+		if ( !trk ) txt = StringTable.Localize("$SWWM_NORADIO");
+		else txt = "\cy♪\ct "..trk.artist.."\cu :: \cd"..trk.title.."\c-";
+		txt2 = playlist.Filter(); // playlist names may contain color codes
+		Vector2 hs = (CleanXFac_1,CleanYFac_1);
+		int wcap = int((Screen.GetWidth()-80.)/hs.x);
+		mSmallFont = Font.GetFont('MPlusFont');
+		// don't use brokenlines if text fits in one line
+		if ( mSmallFont.StringWidth(txt) <= wcap ) l = null;
+		else l = mSmallFont.BreakLines(txt,wcap);
+		holdtics = 90;
+		fadeintics = 10;
+		fadeouttics = 20;
+		tics = 0;
+		return self;
+	}
+
+	override bool Tick()
+	{
+		return (++tics > holdtics+fadeintics+fadeouttics);
+	}
+
+	override void Draw( int bottom, int visibility )
+	{
+		double margin = 40.;	// hardcoded in this case
+		Vector2 hs = (CleanXFac_1,CleanYFac_1);
+		margin *= hs.x;
+		Vector2 bsize;
+		int sw1 = mSmallFont.StringWidth(txt), sw2;
+		if ( l )
+		{
+			sw1 = 0;
+			for ( int i=0; i<l.Count(); i++ )
+				sw1 = max(sw1,l.StringWidth(i));
+		}
+		int swmax;
+		int fh = mSmallFont.GetHeight();
+		if ( txt2 != "" )
+		{
+			sw2 = mSmallFont.StringWidth(txt2);
+			swmax = max(sw1,sw2);
+			bsize = (swmax,l?(fh*(1+l.Count())):(fh*2))*hs.x;
+		}
+		else bsize = (sw1,l?(fh*l.Count()):fh)*hs.x;
+		double ftics = tics+System.GetTimeFrac();	// bless this function, no more hacks to pass around fractics from renderoverlay
+		double alpha = (ftics<fadeintics)?(ftics/fadeintics):(ftics<(fadeintics+holdtics))?1.:(1.-(ftics-(fadeintics+holdtics))/fadeouttics);
+		Vector2 pos = (int(Screen.GetWidth()-bsize.x)/2,margin-int((margin+bsize.y)*(1.-alpha)));
+		Vector2 pad = (8,4)*hs.x;
+		Screen.Dim("Black",alpha*.8,int(pos.x-pad.x),int(pos.y-pad.y),int(bsize.x+2*pad.x),int(bsize.y+2*pad.y));
+		// sometimes we have to show the album name as well
+		if ( txt2 != "" )
+		{
+			Screen.DrawText(mSmallFont,Font.CR_UNTRANSLATED,pos.x+((swmax-sw2)/2)*hs.x,pos.y,txt2,DTA_Alpha,alpha,DTA_ScaleX,hs.x,DTA_ScaleY,hs.x);
+			if ( l ) for ( int i=0; i<l.Count(); i++ ) Screen.DrawText(mSmallFont,Font.CR_UNTRANSLATED,pos.x+((swmax-l.StringWidth(i))/2)*hs.x,pos.y+fh*(i+1)*hs.x,l.StringAt(i),DTA_Alpha,alpha,DTA_ScaleX,hs.x,DTA_ScaleY,hs.x);
+			else Screen.DrawText(mSmallFont,Font.CR_UNTRANSLATED,pos.x+((swmax-sw1)/2)*hs.x,pos.y+fh*hs.x,txt,DTA_Alpha,alpha,DTA_ScaleX,hs.x,DTA_ScaleY,hs.x);
+		}
+		else if ( l ) for ( int i=0; i<l.Count(); i++ ) Screen.DrawText(mSmallFont,Font.CR_UNTRANSLATED,pos.x+((sw1-l.StringWidth(i))/2)*hs.x,pos.y+fh*i*hs.x,l.StringAt(i),DTA_Alpha,alpha,DTA_ScaleX,hs.x,DTA_ScaleY,hs.x);
+		else Screen.DrawText(mSmallFont,Font.CR_UNTRANSLATED,pos.x,pos.y,txt,DTA_Alpha,alpha,DTA_ScaleX,hs.x,DTA_ScaleY,hs.x);
+	}
+}
+
+// a single track with a file path, title and artist
+// as well as a subsong index for tracker music and others
+Class SWWMMusicTrack
+{
+	String path, title, artist;
+	int subsong;
+
+	static SWWMMusicTrack Create( String path, String title, String artist )
+	{
+		let t = new("SWWMMusicTrack");
+		let sep = path.IndexOf(":");	// use colon to delimit subsong
+		if ( sep != -1 )
+		{
+			t.path = path.Left(sep);
+			t.subsong = path.Mid(sep+1).ToInt();
+		}
+		else
+		{
+			t.path = path;
+			t.subsong = 0;
+		}
+		t.title = title;
+		t.artist = artist;
+		return t;
+	}
+}
+
+// a playlist of various songs, containing both shuffled and ordered arrays (for ease of switching between both modes)
+Class SWWMMusicList
+{
+	String listname;
+	int current;
+	Array<SWWMMusicTrack> tracks, ordered;
+	bool shuffled;
+
+	SWWMMusicList Init( int lump )
+	{
+		current = -1;
+		tracks.Clear();
+		// populate list of all songs
+		Array<String> list;
+		String dat = Wads.ReadLump(lump);
+		dat.Replace("\r","");
+		dat.Split(list,"\n");
+		dat.Truncate(dat.Length()-1);	// trim extra null byte (thanks gzdoom)
+		bool lname = false;
+		for ( int i=0; i<list.size(); i++ )
+		{
+			if ( (list[i].Length() == 0) || (list[i].Left(1) == "#") || (list[i].Left(1) == "") )
+				continue;
+			if ( !lname )
+			{
+				listname = list[i];
+				lname = true;
+				continue;
+			}
+			Array<String> ln;
+			list[i].Split(ln,";");
+			if ( ln.Size() != 3 )
+				ThrowAbortException("'%s' - Parse error on line %d. Element count is %d, 3 expected.",Wads.GetLumpFullName(lump),i+1,ln.Size());
+			let t = SWWMMusicTrack.Create(ln[0],ln[1],ln[2]);
+			tracks.Push(t);
+		}
+		if ( listname == "" )
+			ThrowAbortException("'%s' - Playlist has no name.",Wads.GetLumpFullName(lump));
+		if ( tracks.Size() == 0 )
+			ThrowAbortException("'%s' - Playlist has no tracks.",Wads.GetLumpFullName(lump));
+		ordered.Copy(tracks);
+		Shuffle();
+		return self;
+	}
+
+	void Shuffle()
+	{
+		// if shuffling is disabled and we were previously shuffled,
+		// copy over the ordered list
+		if ( !swwmmus_shuffle && shuffled )
+		{
+			tracks.Copy(ordered);
+			current = -1;
+			return;
+		}
+		if ( tracks.Size() <= 2 )
+		{
+			// just one or two tracks? can't shuffle that
+			current = -1;
+			return;
+		}
+		Array<SWWMMusicTrack> shuf;
+		SWWMMusicTrack cur;
+		if ( current != -1 )
+		{
+			cur = tracks[current];
+			// current track will be pushed to last, so we can directly skip over it
+			tracks.Delete(current);
+		}
+		// this is the most naive shuffle method ever,
+		// but it works and doesn't need to be super-efficient
+		// since it is only called sparingly
+		while ( tracks.Size() > 0 )
+		{
+			int idx = Random[PlaylistShuffle](0,tracks.Size()-1);
+			shuf.Push(tracks[idx]);
+			tracks.Delete(idx);
+		}
+		tracks.Move(shuf);
+		if ( cur ) tracks.Push(cur);
+		shuffled = true;
+		current = -1;
+	}
+}
+
+// the entire radio system, persistent for each play session, between maps
+Class SWWMMusicData : Thinker
+{
+	Array<SWWMMusicList> playlist;
+	int curlist;
+	ui SWWMSongInfo msg;	// keep track of current message so we can avoid skipping the fade in/out animation
+
+	SWWMMusicData Init()
+	{
+		ChangeStatNum(STAT_STATIC);
+		Initialize();
+		return self;
+	}
+
+	private void Initialize()
+	{
+		curlist = 0;
+		playlist.Clear();
+		// populate playlists
+		for ( int i=0; i<Wads.GetNumLumps(); i++ )
+		{
+			String fname = Wads.GetLumpFullName(i);
+			if ( !((fname ~== "playlist") || (fname.Left(9) ~== "playlist.")) )
+				continue;
+			playlist.Push(new("SWWMMusicList").Init(i));
+		}
+		Console.PrintfEx(PRINT_HIGH|PRINT_NONOTIFY,StringTable.Localize("$SWWM_RADIOSETUP"));
+		if ( playlist.Size() == 0 )	// don't abort out for this, just warn
+			Console.PrintfEx(PRINT_HIGH|PRINT_NONOTIFY,StringTable.Localize("$SWWM_RADIOPLWARN"));
+	}
+
+	static void Pick( bool reset = false, bool noadvance = false )
+	{
+		let t = ThinkerIterator.Create("SWWMMusicData",STAT_STATIC);
+		let d = SWWMMusicData(t.Next());
+		if ( !d ) d = new("SWWMMusicData").Init();
+		// if there's no playlists or index is -1, switch to the map default music
+		if ( (d.playlist.Size() == 0) || (d.curlist == -1) )
+		{
+			S_ChangeMusic("*");
+			return;
+		}
+		let list = d.playlist[d.curlist];
+		// restart current track
+		if ( reset )
+		{
+			d.S_ChangeMusic(list.tracks[list.current].path,list.tracks[list.current].subsong,swwmmus_loop,true);
+			return;
+		}
+		if ( !noadvance || (list.current == -1) )
+		{
+			if ( list.current == -1 ) list.current = 0; // first start
+			else if ( list.tracks.Size() <= 2 )
+			{
+				// simplified, no need to shuffle in these cases
+				list.current = (list.current+1)%list.tracks.Size();
+			}
+			else if ( list.current >= list.tracks.Size()-1 )
+			{
+				// re-shuffle playlist and advance
+				list.Shuffle();
+				list.current++;
+			}
+			else list.current++; // just advance
+		}
+		S_ChangeMusic(list.tracks[list.current].path,list.tracks[list.current].subsong,swwmmus_loop,true);
+	}
+
+	// get current playing track in current playlist
+	// or -1 if no track is active
+	static clearscope int GetCurrent()
+	{
+		let t = ThinkerIterator.Create("SWWMMusicData",STAT_STATIC);
+		let d = SWWMMusicData(t.Next());
+		if ( !d || (d.playlist.Size() == 0) ) return -1;
+		if ( d.curlist == -1 ) return 0;
+		let list = d.playlist[d.curlist];
+		return list.current;
+	}
+
+	// get file path of current track
+	static clearscope String GetCurrentPath()
+	{
+		let t = ThinkerIterator.Create("SWWMMusicData",STAT_STATIC);
+		let d = SWWMMusicData(t.Next());
+		if ( !d || (d.playlist.Size() == 0) ) return "";
+		if ( d.curlist == -1 ) return musplaying.name;
+		let list = d.playlist[d.curlist];
+		return list.tracks[list.current].path;
+	}
+
+	// switch to another playlist
+	static void SwitchPlaylist()
+	{
+		let t = ThinkerIterator.Create("SWWMMusicData",STAT_STATIC);
+		let d = SWWMMusicData(t.Next());
+		if ( !d || (d.playlist.Size() == 0) ) return;
+		d.curlist++;
+		if ( d.curlist >= d.playlist.Size() )
+			d.curlist = -1;	// default music
+		d.Pick(noadvance:true);
+	}
+
+	static ui void ShowSongInfo( bool album )
+	{
+		let t = ThinkerIterator.Create("SWWMMusicData",STAT_STATIC);
+		let d = SWWMMusicData(t.Next());
+		if ( !d || (d.playlist.Size() == 0) ) return;
+		double ntic = 0.;
+		if ( d.msg )
+		{
+			if ( d.msg.tics < d.msg.fadeintics )
+				ntic = d.msg.tics;
+			else if ( d.msg.tics > d.msg.fadeintics+d.msg.holdtics )
+				ntic = (d.msg.fadeouttics-(d.msg.tics-(d.msg.fadeintics+d.msg.holdtics)))/2;
+			else ntic = d.msg.fadeintics;
+		}
+		if ( d.curlist != -1 )
+		{
+			let list = d.playlist[d.curlist];
+			d.msg = new("SWWMSongInfo").Init(list.tracks[list.current],album?list.listname:"");
+		}
+		else d.msg = new("SWWMSongInfo").Init(null,"");	// "radio disabled" message
+		d.msg.tics = ntic;
+		StatusBar.AttachMessage(d.msg,-56346);
+	}
+}
+
+// static handler for setting up the radio and automating track switching
+Class SWWMRadio : StaticEventHandler
+{
+	int queuedtic;
+	bool showalbum;
+
+	override void OnRegister()
+	{
+		// initialize seed so shuffling order is unique each launch
+		SetRandomSeed[PlaylistShuffle](int(MSTimeF())+consoleplayer);
+	}
+
+	private clearscope bool IsMuted() const
+	{
+		// [SWWM GZ] pause when map is clear
+		if ( (musplaying.name == "music/nomusic.ogg") || (musplaying.name == "music/solitary.ogg") ) return true;
+		return false;
+	}
+
+	override void WorldLoaded( WorldEvent e )
+	{
+		// only perform this action when we're loading from a save and the radio isn't muted
+		if ( (gamestate != GS_LEVEL) || IsMuted() || !e.IsSaveGame ) return;
+		// since only the music name and order are serialized, we need
+		// to change the music here by force to reset the correct looping flag
+		if ( (SWWMMusicData.GetCurrent() != -1) && (musplaying.name == SWWMMusicData.GetCurrentPath()) )
+			S_ChangeMusic(musplaying.name,musplaying.baseorder,swwmmus_loop,true);
+	}
+
+	override void WorldTick()
+	{
+		if ( (gamestate != GS_LEVEL) || IsMuted() ) return;
+		// automatically switch tracks if the currently playing one has ended
+		// note that this also triggers if some other external script changes the music
+		if ( (SWWMMusicData.GetCurrent() == -1) || (musplaying.name != SWWMMusicData.GetCurrentPath()) )
+		{
+			queuedtic = gametic;
+			showalbum = (SWWMMusicData.GetCurrent() == -1);
+			SWWMMusicData.Pick();
+		}
+	}
+
+	override void PostUiTick()
+	{
+		// ui event for showing the "now playing" message
+		if ( (gamestate != GS_LEVEL) || IsMuted() ) return;
+		if ( gametic > queuedtic ) return;
+		if ( SWWMMusicData.GetCurrent() == -1 ) return;
+		SWWMMusicData.ShowSongInfo(showalbum);
+	}
+
+	override void NetworkProcess( ConsoleEvent e )
+	{
+		if ( e.player != consoleplayer ) return;
+		if ( e.Name ~== "swwm_musremove" )
+		{
+			let t = ThinkerIterator.Create("SWWMMusicData",Thinker.STAT_STATIC);
+			let d = SWWMMusicData(t.Next());
+			if ( d )
+			{
+				for ( int i=0; i<d.playlist.Size(); i++ )
+				{
+					for ( int j=0; j<d.playlist[i].tracks.Size(); j++ )
+						d.playlist[i].tracks[j].Destroy();
+					d.playlist[i].Destroy();
+				}
+				d.Destroy();
+			}
+			S_ChangeMusic("*");
+			Console.PrintfEx(PRINT_HIGH|PRINT_NONOTIFY,StringTable.Localize("$SWWM_RADIOUNINST"));
+			Destroy();
+			return;
+		}
+		else if ( e.Name ~== "swwm_musreload" )
+		{
+			let t = ThinkerIterator.Create("SWWMMusicData",Thinker.STAT_STATIC);
+			let d = SWWMMusicData(t.Next());
+			if ( d )
+			{
+				for ( int i=0; i<d.playlist.Size(); i++ )
+				{
+					for ( int j=0; j<d.playlist[i].tracks.Size(); j++ )
+						d.playlist[i].tracks[j].Destroy();
+					d.playlist[i].Destroy();
+				}
+				d.Destroy();
+			}
+			if ( (gamestate != GS_LEVEL) || IsMuted() ) return;
+			queuedtic = gametic;
+			showalbum = true;
+			SWWMMusicData.Pick();
+			return;
+		}
+		if ( (gamestate != GS_LEVEL) || IsMuted() ) return;
+		if ( e.Name ~== "swwm_mustrack" )
+		{
+			queuedtic = gametic;
+			showalbum = false;
+			SWWMMusicData.Pick();
+		}
+		else if ( e.Name ~== "swwm_musinfo" )
+		{
+			queuedtic = gametic;
+			showalbum = true;
+		}
+		else if ( e.Name ~== "swwm_muslist" )
+		{
+			queuedtic = gametic;
+			showalbum = true;
+			SWWMMusicData.SwitchPlaylist();
+		}
+	}
+}
