@@ -226,6 +226,12 @@ Class SWWMMusicData : Thinker
 		Console.PrintfEx(PRINT_HIGH|PRINT_NONOTIFY,StringTable.Localize("$SWWM_RADIOSETUP"));
 		if ( playlist.Size() == 0 )	// don't abort out for this, just warn
 			Console.PrintfEx(PRINT_HIGH|PRINT_NONOTIFY,StringTable.Localize("$SWWM_RADIOPLWARN"));
+		else
+		{
+			Console.PrintfEx(PRINT_HIGH|PRINT_NONOTIFY,StringTable.Localize("$SWWM_RADIOPLLIST"));
+			for ( int i=0; i<playlist.Size(); i++ )
+				Console.PrintfEx(PRINT_HIGH|PRINT_NONOTIFY,String.Format(StringTable.Localize("$SWWM_RADIOPLELEM"),i+1,playlist[i].listname.Filter(),playlist[i].tracks.Size()));
+		}
 	}
 
 	static void Pick( bool reset = false, bool noadvance = false )
